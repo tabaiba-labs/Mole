@@ -13,7 +13,7 @@
 </p>
 
 <p align="center">
-  <img src="https://cdn.tw93.fun/img/mole.jpeg" alt="Mole - 95.50GB freed" width="1000" />
+  <img src="https://gw.alipayobjects.com/zos/k/ro/ZzF8e8.png" alt="Mole - 95.50GB freed" width="1000" />
 </p>
 
 ## Features
@@ -342,7 +342,7 @@ Thanks to everyone who helped build Mole. Go follow them. ❤️
 <br/><br/>
 Real feedback from users who shared Mole on X.
 
-<img src="https://cdn.tw93.fun/pic/lovemole.jpeg" alt="Community feedback on Mole" width="1000" />
+<img src="https://gw.alipayobjects.com/zos/k/dl/lovemole.jpeg" alt="Community feedback on Mole" width="1000" />
 
 ## Support
 
