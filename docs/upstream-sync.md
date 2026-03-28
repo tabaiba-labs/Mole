@@ -1,27 +1,21 @@
 # Upstream Sync Strategy
 
-This repository keeps the original Mole git history at the root so the native macOS app can live alongside the CLI without losing upstream mergeability.
+This repository is the Mole engine fork used by the desktop app.
 
-## Why the repo root is the Mole fork
+The desktop app itself lives in a separate repository root and includes this fork as a submodule at `dependencies/Mole/`.
 
-- upstream Mole history and files are tracked directly at the repository root
-- future native app code can be added in new top-level folders such as `App/`, `Packages/`, or `docs/`
-- pulling upstream changes stays a normal git workflow instead of a fragile copy-sync process
+## Why this repo stays separate from the desktop app
+
+- upstream Mole history and files stay isolated from app-level code
+- GUI integration changes can be reviewed and merged as Mole engine changes
+- pulling upstream Mole changes stays a normal git workflow instead of a manual vendor sync process
 
 ## Recommended remote layout
 
-When you create your own hosted repository for this product, use:
+For this fork, use:
 
-- `origin` -> your product repository
+- `origin` -> `https://github.com/tabaiba-labs/Mole.git`
 - `upstream` -> `https://github.com/tw93/Mole.git`
-
-Example:
-
-```bash
-git remote rename origin upstream
-git remote add origin <your-product-repo-url>
-git fetch upstream
-```
 
 ## Normal update flow
 
@@ -62,3 +56,9 @@ Keep GUI-specific behavior limited to the machine contract layer:
 - compatibility wrappers in `lib/clean/step_helpers.sh`
 
 Avoid rewriting Mole cleanup heuristics in app code. The GUI should consume the contract, not duplicate cleanup logic.
+
+## Relationship To The App Repo
+
+- the desktop app repository tracks this fork as a submodule at `dependencies/Mole/`
+- the app repo should only update the submodule pointer after Mole-side changes are committed and pushed here
+- app-level docs live in the desktop app root `docs/`, not in this fork
