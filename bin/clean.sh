@@ -10,6 +10,7 @@ export LANG=C
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$SCRIPT_DIR/../lib/core/common.sh"
+source "$SCRIPT_DIR/../lib/core/machine_output.sh"
 
 source "$SCRIPT_DIR/../lib/core/sudo.sh"
 source "$SCRIPT_DIR/../lib/clean/brew.sh"
@@ -18,6 +19,8 @@ source "$SCRIPT_DIR/../lib/clean/apps.sh"
 source "$SCRIPT_DIR/../lib/clean/dev.sh"
 source "$SCRIPT_DIR/../lib/clean/app_caches.sh"
 source "$SCRIPT_DIR/../lib/clean/hints.sh"
+source "$SCRIPT_DIR/../lib/clean/registry.sh"
+source "$SCRIPT_DIR/../lib/clean/step_helpers.sh"
 source "$SCRIPT_DIR/../lib/clean/system.sh"
 source "$SCRIPT_DIR/../lib/clean/user.sh"
 
@@ -26,6 +29,22 @@ DRY_RUN=false
 PROTECT_FINDER_METADATA=false
 EXTERNAL_VOLUME_TARGET=""
 IS_M_SERIES=$([[ "$(uname -m)" == "arm64" ]] && echo "true" || echo "false")
+MOLE_CLI_VERSION=$(sed -n 's/^VERSION="\(.*\)"$/\1/p' "$SCRIPT_DIR/../mole" | head -1)
+MOLE_INTERFACE="human"
+MOLE_OUTPUT_MODE="execute"
+MOLE_SCOPE="all"
+MOLE_SCOPE_EFFECTIVE="all"
+MOLE_SELECTED_STEPS_CSV=""
+MOLE_BLOCKING_POLICY="skip"
+MOLE_EVENTS_FILE=""
+MOLE_SUMMARY_FILE=""
+MOLE_PLAN_FILE=""
+MOLE_RUN_ID=""
+MOLE_ITEM_EVENTS="grouped"
+MOLE_MACHINE_SILENT_STDIO=0
+declare -a MOLE_SELECTED_STEP_RECORDS=()
+declare -a MOLE_SELECTED_SECTION_IDS=()
+declare -a MOLE_REQUIRED_CAPABILITY_ERRORS=()
 
 EXPORT_LIST_FILE="$HOME/.config/mole/clean-list.txt"
 CURRENT_SECTION=""
@@ -217,6 +236,504 @@ end_section() {
         echo -e "  ${GREEN}${ICON_SUCCESS}${NC} Nothing to clean"
     fi
     TRACK_SECTION=0
+}
+
+clean_machine_mode_enabled() {
+    mole_machine_is_jsonl
+}
+
+clean_selected_section_count() {
+    local count=0
+    local item
+    for item in "${MOLE_SELECTED_SECTION_IDS[@]-}"; do
+        [[ -n "$item" ]] && count=$((count + 1))
+    done
+    printf '%s\n' "$count"
+}
+
+clean_selected_step_count() {
+    local count=0
+    local item
+    for item in "${MOLE_SELECTED_STEP_RECORDS[@]-}"; do
+        [[ -n "$item" ]] && count=$((count + 1))
+    done
+    printf '%s\n' "$count"
+}
+
+clean_step_requires_capability() {
+    local capability_id="$1"
+    local csv="$2"
+    [[ -z "$csv" ]] && return 1
+    local item
+    local old_ifs="$IFS"
+    IFS=','
+    for item in $csv; do
+        if [[ "$item" == "$capability_id" ]]; then
+            IFS="$old_ifs"
+            return 0
+        fi
+    done
+    IFS="$old_ifs"
+    return 1
+}
+
+clean_selected_step_ids_csv_for_capability() {
+    local capability_id="$1"
+    local include_recommended="${2:-false}"
+    local result=""
+    local entry
+
+    for entry in "${MOLE_SELECTED_STEP_RECORDS[@]-}"; do
+        local step_id section_id label function_name kind required_caps recommended_caps scope
+        IFS='|' read -r step_id section_id label function_name kind required_caps recommended_caps scope <<< "$entry"
+        if clean_step_requires_capability "$capability_id" "$required_caps" || { [[ "$include_recommended" == "true" ]] && clean_step_requires_capability "$capability_id" "$recommended_caps"; }; then
+            if [[ -n "$result" ]]; then
+                result+="," 
+            fi
+            result+="$step_id"
+        fi
+    done
+
+    result=${result//, /,}
+    printf '%s\n' "$result"
+}
+
+clean_capability_state() {
+    local capability_id="$1"
+    case "$capability_id" in
+        sudo.session)
+            if [[ -z "$(clean_selected_step_ids_csv_for_capability "$capability_id")" ]]; then
+                echo "not_applicable"
+            elif has_sudo_session; then
+                echo "granted"
+            else
+                echo "missing"
+            fi
+            ;;
+        full_disk_access)
+            if has_full_disk_access; then
+                echo "granted"
+            else
+                case $? in
+                    1) echo "missing" ;;
+                    2) echo "unknown" ;;
+                    *) echo "unknown" ;;
+                esac
+            fi
+            ;;
+        automation.finder)
+            if command -v osascript > /dev/null 2>&1; then
+                echo "unknown"
+            else
+                echo "unavailable"
+            fi
+            ;;
+        access.user_library)
+            if [[ -d "$HOME/Library" ]] && ls "$HOME/Library" > /dev/null 2>&1; then
+                echo "granted"
+            else
+                echo "missing"
+            fi
+            ;;
+        access.application_support)
+            if [[ ! -d "$HOME/Library/Application Support" ]]; then
+                echo "not_applicable"
+            elif ls "$HOME/Library/Application Support" > /dev/null 2>&1; then
+                echo "granted"
+            else
+                echo "missing"
+            fi
+            ;;
+        access.containers)
+            if [[ ! -d "$HOME/Library/Containers" ]]; then
+                echo "not_applicable"
+            elif ls "$HOME/Library/Containers" > /dev/null 2>&1; then
+                echo "granted"
+            else
+                echo "missing"
+            fi
+            ;;
+        access.group_containers)
+            if [[ ! -d "$HOME/Library/Group Containers" ]]; then
+                echo "not_applicable"
+            elif ls "$HOME/Library/Group Containers" > /dev/null 2>&1; then
+                echo "granted"
+            else
+                echo "missing"
+            fi
+            ;;
+        access.browser_profiles)
+            if [[ -d "$HOME/Library/Application Support" ]] && ls "$HOME/Library/Application Support" > /dev/null 2>&1; then
+                echo "granted"
+            else
+                echo "missing"
+            fi
+            ;;
+        access.external_volume)
+            if [[ -n "$EXTERNAL_VOLUME_TARGET" && -e "$EXTERNAL_VOLUME_TARGET" ]]; then
+                echo "granted"
+            else
+                echo "missing"
+            fi
+            ;;
+        tool.tmutil)
+            command -v tmutil > /dev/null 2>&1 && echo "granted" || echo "unavailable"
+            ;;
+        tool.diskutil)
+            command -v diskutil > /dev/null 2>&1 && echo "granted" || echo "unavailable"
+            ;;
+        tool.mdfind)
+            command -v mdfind > /dev/null 2>&1 && echo "granted" || echo "unavailable"
+            ;;
+        *)
+            echo "unknown"
+            ;;
+    esac
+}
+
+clean_capability_message() {
+    local capability_id="$1"
+    case "$capability_id" in
+        sudo.session) echo "Administrative access is required for selected cleanup steps." ;;
+        full_disk_access) echo "Full Disk Access may be required to inspect and clean all selected locations." ;;
+        automation.finder) echo "Finder automation may improve Trash handling." ;;
+        access.application_support) echo "Application Support is not fully accessible." ;;
+        access.containers) echo "Containers are not fully accessible." ;;
+        access.group_containers) echo "Group Containers are not fully accessible." ;;
+        access.external_volume) echo "The selected external volume is not accessible." ;;
+        tool.tmutil) echo "tmutil is unavailable for selected Time Machine steps." ;;
+        tool.diskutil) echo "diskutil is unavailable for external volume cleanup." ;;
+        tool.mdfind) echo "mdfind is unavailable for orphaned system service detection." ;;
+        *) echo "$capability_id state changed." ;;
+    esac
+}
+
+clean_resolve_selected_steps() {
+    clean_registry_init
+    MOLE_SELECTED_STEP_RECORDS=()
+    MOLE_SELECTED_SECTION_IDS=()
+
+    if [[ -n "$EXTERNAL_VOLUME_TARGET" ]]; then
+        MOLE_SCOPE="external"
+    fi
+    MOLE_SCOPE_EFFECTIVE="$MOLE_SCOPE"
+
+    local entry
+    while IFS= read -r entry; do
+        [[ -z "$entry" ]] && continue
+        MOLE_SELECTED_STEP_RECORDS+=("$entry")
+        local step_id section_id label function_name kind required_caps recommended_caps scope
+        IFS='|' read -r step_id section_id label function_name kind required_caps recommended_caps scope <<< "$entry"
+        local seen=false
+        local existing
+        for existing in "${MOLE_SELECTED_SECTION_IDS[@]-}"; do
+            if [[ "$existing" == "$section_id" ]]; then
+                seen=true
+                break
+            fi
+        done
+        [[ "$seen" == "true" ]] || MOLE_SELECTED_SECTION_IDS+=("$section_id")
+    done < <(clean_selected_step_records)
+}
+
+clean_emit_run_context() {
+    clean_machine_mode_enabled || return 0
+
+    local argv_json="["
+    local first=true
+    local arg
+    for arg in "$@"; do
+        if [[ "$first" == "true" ]]; then
+            first=false
+        else
+            argv_json+="," 
+        fi
+        argv_json+=$(mole_machine_json_string "$arg")
+    done
+    argv_json=${argv_json//, /,}
+    argv_json+="]"
+
+    mole_machine_emit "run.started" "$(printf '{"argv":%s,"interface":%s,"mode":%s,"scope_requested":%s,"steps_requested":%s,"external_target":%s,"blocking_policy":%s}' \
+        "$argv_json" \
+        "$(mole_machine_json_string "$MOLE_INTERFACE")" \
+        "$(mole_machine_json_string "$MOLE_OUTPUT_MODE")" \
+        "$(mole_machine_json_string "$MOLE_SCOPE")" \
+        "$(mole_machine_json_array_from_csv "$MOLE_SELECTED_STEPS_CSV")" \
+        "$(mole_machine_json_string "$EXTERNAL_VOLUME_TARGET")" \
+        "$(mole_machine_json_string "$MOLE_BLOCKING_POLICY")")"
+
+    mole_machine_emit "run.context" "$(printf '{"mole_version":%s,"os_version":%s,"arch":%s,"uid":%s,"euid":%s,"home":%s,"cwd":%s,"log_dir":%s}' \
+        "$(mole_machine_json_string "${MOLE_CLI_VERSION:-unknown}")" \
+        "$(mole_machine_json_string "$(sw_vers -productVersion 2> /dev/null || echo unknown)")" \
+        "$(mole_machine_json_string "$(uname -m)")" \
+        "$(mole_machine_json_number "$(id -u)")" \
+        "$(mole_machine_json_number "$(id -u)")" \
+        "$(mole_machine_json_string "$HOME")" \
+        "$(mole_machine_json_string "$PWD")" \
+        "$(mole_machine_json_string "$HOME/Library/Logs/mole")")"
+
+    local section_json="["
+    local section_first=true
+    local section_id
+    for section_id in "${MOLE_SELECTED_SECTION_IDS[@]-}"; do
+        if [[ "$section_first" == "true" ]]; then
+            section_first=false
+        else
+            section_json+="," 
+        fi
+        section_json+=$(mole_machine_json_string "$section_id")
+    done
+    section_json=${section_json//, /,}
+    section_json+="]"
+
+    local step_json="["
+    local step_first=true
+    local step_entry
+    for step_entry in "${MOLE_SELECTED_STEP_RECORDS[@]-}"; do
+        local step_id
+        IFS='|' read -r step_id _rest <<< "$step_entry"
+        if [[ "$step_first" == "true" ]]; then
+            step_first=false
+        else
+            step_json+="," 
+        fi
+        step_json+=$(mole_machine_json_string "$step_id")
+    done
+    step_json=${step_json//, /,}
+    step_json+="]"
+
+    mole_machine_emit "scope.resolved" "$(printf '{"scope_effective":%s,"section_ids":%s,"step_ids":%s}' \
+        "$(mole_machine_json_string "$MOLE_SCOPE_EFFECTIVE")" \
+        "$section_json" \
+        "$step_json")"
+}
+
+clean_emit_capabilities() {
+    clean_machine_mode_enabled || return 0
+
+    local known_capabilities=(
+        "sudo.session"
+        "full_disk_access"
+        "automation.finder"
+        "access.user_library"
+        "access.application_support"
+        "access.containers"
+        "access.group_containers"
+        "access.browser_profiles"
+        "access.external_volume"
+        "tool.tmutil"
+        "tool.diskutil"
+        "tool.mdfind"
+    )
+    local capability_id
+    for capability_id in "${known_capabilities[@]}"; do
+        local required_steps recommended_steps severity state remediation
+        required_steps=$(clean_selected_step_ids_csv_for_capability "$capability_id")
+        recommended_steps=$(clean_selected_step_ids_csv_for_capability "$capability_id" true)
+        [[ -z "$recommended_steps" ]] && continue
+        severity="recommended"
+        [[ -n "$required_steps" ]] && severity="required"
+        state=$(clean_capability_state "$capability_id")
+        remediation="review"
+        if [[ "$capability_id" == "sudo.session" ]]; then
+            remediation="elevate_and_retry"
+        elif [[ "$capability_id" == "full_disk_access" ]]; then
+            remediation="open_system_settings"
+        fi
+        mole_machine_record_capability "$capability_id" "$state" "$severity" "$recommended_steps" "$(clean_capability_message "$capability_id")" "$remediation"
+        if [[ "$severity" == "required" && "$state" != "granted" && "$state" != "not_applicable" ]]; then
+            MOLE_REQUIRED_CAPABILITY_ERRORS+=("$capability_id")
+        fi
+    done
+}
+
+clean_required_capability_missing_for_step() {
+    local required_csv="$1"
+    local item
+    local old_ifs="$IFS"
+    IFS=','
+    for item in $required_csv; do
+        [[ -z "$item" ]] && continue
+        local state
+        state=$(clean_capability_state "$item")
+        if [[ "$state" != "granted" && "$state" != "not_applicable" ]]; then
+            IFS="$old_ifs"
+            printf '%s\n' "$item"
+            return 0
+        fi
+    done
+    IFS="$old_ifs"
+    return 1
+}
+
+clean_run_step_record() {
+    local entry="$1"
+    local step_id section_id label function_name kind required_caps recommended_caps scope
+    IFS='|' read -r step_id section_id label function_name kind required_caps recommended_caps scope <<< "$entry"
+
+    local step_index="$2"
+    local step_total="$3"
+    local missing_capability=""
+    missing_capability=$(clean_required_capability_missing_for_step "$required_caps" || true)
+
+    MOLE_CLEAN_CURRENT_STEP_ID="$step_id"
+    MOLE_CLEAN_CURRENT_STEP_LABEL="$label"
+    MOLE_CLEAN_CURRENT_SECTION_ID="$section_id"
+
+    clean_machine_mode_enabled && mole_machine_emit "step.started" "$(printf '{"step_id":%s,"section_id":%s,"label":%s,"kind":%s,"capabilities_required":%s,"capabilities_recommended":%s,"destructive":%s,"index":%s,"count":%s}' \
+        "$(mole_machine_json_string "$step_id")" \
+        "$(mole_machine_json_string "$section_id")" \
+        "$(mole_machine_json_string "$label")" \
+        "$(mole_machine_json_string "$kind")" \
+        "$(mole_machine_json_array_from_csv "$required_caps")" \
+        "$(mole_machine_json_array_from_csv "$recommended_caps")" \
+        "$(mole_machine_json_bool "$([[ "$kind" == "hint" || "$kind" == "check" || "$kind" == "scan" ]] && echo false || echo true)")" \
+        "$(mole_machine_json_number "$step_index")" \
+        "$(mole_machine_json_number "$step_total")")"
+
+    if [[ -n "$missing_capability" ]]; then
+        clean_machine_mode_enabled && mole_machine_notice "warning" "capability_missing" "$label skipped: $missing_capability is unavailable." "$section_id" "$step_id"
+        clean_machine_mode_enabled && mole_machine_emit "step.completed" "$(printf '{"step_id":%s,"status":%s,"reason_code":%s,"capability_id":%s}' \
+            "$(mole_machine_json_string "$step_id")" \
+            "$(mole_machine_json_string "blocked")" \
+            "$(mole_machine_json_string "capability_missing")" \
+            "$(mole_machine_json_string "$missing_capability")")"
+        mole_machine_record_step_result "$step_id" "$section_id" "blocked" 0 0 0 0 0 "capability_missing"
+        [[ "$MOLE_BLOCKING_POLICY" == "fail" ]] && return 4
+        return 0
+    fi
+
+    if [[ "$MOLE_OUTPUT_MODE" == "preflight" ]]; then
+        clean_machine_mode_enabled && mole_machine_emit "step.completed" "$(printf '{"step_id":%s,"status":%s,"freed_bytes":0,"items":0,"skipped":0,"failed":0,"duration_ms":0}' \
+            "$(mole_machine_json_string "$step_id")" \
+            "$(mole_machine_json_string "ok")")"
+        mole_machine_record_step_result "$step_id" "$section_id" "ok" 0 0 0 0 0 ""
+        return 0
+    fi
+
+    local bytes_before items_before skip_before failed_before started_at rc duration_ms bytes_delta items_delta
+    bytes_before=$total_size_cleaned
+    items_before=$files_cleaned
+    skip_before=$whitelist_skipped_count
+    failed_before=${MOLE_PERMISSION_DENIED_COUNT:-0}
+    started_at=$(date +%s)
+    rc=0
+    if clean_machine_mode_enabled; then
+        "$function_name" > /dev/null 2>&1 || rc=$?
+    else
+        "$function_name" || rc=$?
+    fi
+    duration_ms=$(( ( $(date +%s) - started_at ) * 1000 ))
+    bytes_delta=$(((total_size_cleaned - bytes_before) * 1024))
+    items_delta=$((files_cleaned - items_before))
+    local skipped_delta=$((whitelist_skipped_count - skip_before))
+    local failed_delta=$(( ${MOLE_PERMISSION_DENIED_COUNT:-0} - failed_before ))
+    local step_status="ok"
+    local reason_code=""
+    if [[ $rc -ne 0 ]]; then
+        step_status="failed"
+        reason_code="internal_error"
+    fi
+
+    clean_machine_mode_enabled && mole_machine_emit "step.completed" "$(printf '{"step_id":%s,"status":%s,"freed_bytes":%s,"items":%s,"skipped":%s,"failed":%s,"duration_ms":%s}' \
+        "$(mole_machine_json_string "$step_id")" \
+        "$(mole_machine_json_string "$step_status")" \
+        "$(mole_machine_json_number "$bytes_delta")" \
+        "$(mole_machine_json_number "$items_delta")" \
+        "$(mole_machine_json_number "$skipped_delta")" \
+        "$(mole_machine_json_number "$failed_delta")" \
+        "$(mole_machine_json_number "$duration_ms")")"
+    mole_machine_record_step_result "$step_id" "$section_id" "$step_status" "$bytes_delta" "$items_delta" "$skipped_delta" "$failed_delta" "$duration_ms" "$reason_code"
+    return $rc
+}
+
+clean_run_section() {
+    local section_id="$1"
+    local section_label
+    section_label=$(clean_section_label "$section_id")
+    local section_steps=()
+    local entry
+    for entry in "${MOLE_SELECTED_STEP_RECORDS[@]-}"; do
+        local step_id current_section label function_name kind required_caps recommended_caps scope
+        IFS='|' read -r step_id current_section label function_name kind required_caps recommended_caps scope <<< "$entry"
+        [[ "$current_section" == "$section_id" ]] && section_steps+=("$entry")
+    done
+    [[ ${#section_steps[@]} -eq 0 ]] && return 0
+
+    local section_index=1
+    local idx lookup_section
+    local selected_sections=("${MOLE_SELECTED_SECTION_IDS[@]-}")
+    for idx in "${!selected_sections[@]}"; do
+        lookup_section="${selected_sections[$idx]}"
+        if [[ "$lookup_section" == "$section_id" ]]; then
+            section_index=$((idx + 1))
+            break
+        fi
+    done
+
+    if clean_machine_mode_enabled; then
+        mole_machine_emit "section.started" "$(printf '{"section_id":%s,"label":%s,"index":%s,"count":%s}' \
+            "$(mole_machine_json_string "$section_id")" \
+            "$(mole_machine_json_string "$section_label")" \
+            "$(mole_machine_json_number "$section_index")" \
+            "$(mole_machine_json_number "$(clean_selected_section_count)")")"
+    else
+        start_section "$section_label"
+    fi
+
+    local bytes_before=$total_size_cleaned
+    local items_before=$files_cleaned
+    local skip_before=$whitelist_skipped_count
+    local failed_before=${MOLE_PERMISSION_DENIED_COUNT:-0}
+    local started_at
+    started_at=$(date +%s)
+    local rc=0
+    local step_total=${#section_steps[@]}
+    for idx in "${!section_steps[@]}"; do
+        clean_run_step_record "${section_steps[$idx]}" "$((idx + 1))" "$step_total" || rc=$?
+        if [[ $rc -eq 4 && "$MOLE_BLOCKING_POLICY" == "fail" ]]; then
+            break
+        fi
+    done
+
+    local duration_ms=$(( ( $(date +%s) - started_at ) * 1000 ))
+    local bytes_delta=$(((total_size_cleaned - bytes_before) * 1024))
+    local items_delta=$((files_cleaned - items_before))
+    local skipped_delta=$((whitelist_skipped_count - skip_before))
+    local failed_delta=$(( ${MOLE_PERMISSION_DENIED_COUNT:-0} - failed_before ))
+    local section_status="ok"
+    [[ $rc -ne 0 && $rc -ne 4 ]] && section_status="failed"
+    [[ $rc -eq 4 ]] && section_status="blocked"
+
+    if clean_machine_mode_enabled; then
+        mole_machine_emit "section.completed" "$(printf '{"section_id":%s,"status":%s,"duration_ms":%s,"totals":{"estimated_bytes":%s,"freed_bytes":%s,"candidates_found":%s,"items_deleted":%s,"items_skipped":%s,"items_failed":%s}}' \
+            "$(mole_machine_json_string "$section_id")" \
+            "$(mole_machine_json_string "$section_status")" \
+            "$(mole_machine_json_number "$duration_ms")" \
+            "$(mole_machine_json_number "$bytes_delta")" \
+            "$(mole_machine_json_number "$bytes_delta")" \
+            "$(mole_machine_json_number "$items_delta")" \
+            "$(mole_machine_json_number "$items_delta")" \
+            "$(mole_machine_json_number "$skipped_delta")" \
+            "$(mole_machine_json_number "$failed_delta")")"
+    else
+        end_section
+    fi
+
+    mole_machine_record_section_result "$section_id" "$section_status" "$bytes_delta" "$items_delta" "$skipped_delta" "$failed_delta" "$duration_ms"
+    return $rc
+}
+
+clean_run_selected_sections() {
+    local section_id
+    local rc=0
+    for section_id in "${MOLE_SELECTED_SECTION_IDS[@]-}"; do
+        clean_run_section "$section_id" || rc=$?
+        if [[ $rc -eq 4 && "$MOLE_BLOCKING_POLICY" == "fail" ]]; then
+            return 4
+        fi
+    done
+    return $rc
 }
 
 # shellcheck disable=SC2329
@@ -669,8 +1186,26 @@ safe_clean() {
             label+=" ${#targets[@]} items"
         fi
 
+        if clean_machine_mode_enabled && [[ "${MOLE_ITEM_EVENTS:-grouped}" == "grouped" ]]; then
+            local candidate_path="${existing_paths[0]:-}"
+            local candidate_display="$candidate_path"
+            local candidate_kind="file"
+            [[ -d "$candidate_path" ]] && candidate_kind="directory"
+            [[ -z "$candidate_path" ]] && candidate_display="$label"
+            local grouped_candidate_id
+            grouped_candidate_id=$(mole_machine_candidate_id_for_logical "$(printf '%s' "$label" | tr '[:upper:]' '[:lower:]' | tr -cs 'a-z0-9' '-')")
+            mole_machine_candidate_found "$grouped_candidate_id" "$label" "logical" "delete_path" "$candidate_path" "$candidate_display" "$candidate_kind" "$((total_size_kb * 1024))" "$total_count" "" '{}'
+            if [[ "$DRY_RUN" == "true" ]]; then
+                mole_machine_item_result "$grouped_candidate_id" "$label" "would_clean" "$((total_size_kb * 1024))" "$total_count" "" 0
+            else
+                mole_machine_item_result "$grouped_candidate_id" "$label" "cleaned" "$((total_size_kb * 1024))" "$total_count" "" 0
+            fi
+        fi
+
         if [[ "$DRY_RUN" == "true" ]]; then
-            echo -e "  ${YELLOW}${ICON_DRY_RUN}${NC} $label${NC}, ${YELLOW}$size_human dry${NC}"
+            if ! clean_machine_mode_enabled; then
+                echo -e "  ${YELLOW}${ICON_DRY_RUN}${NC} $label${NC}, ${YELLOW}$size_human dry${NC}"
+            fi
 
             local paths_temp
             paths_temp=$(create_temp_file)
@@ -730,9 +1265,11 @@ safe_clean() {
                 done
             fi
         else
-            local line_color
-            line_color=$(cleanup_result_color_kb "$total_size_kb")
-            echo -e "  ${line_color}${ICON_SUCCESS}${NC} $label${NC}, ${line_color}$size_human${NC}"
+            if ! clean_machine_mode_enabled; then
+                local line_color
+                line_color=$(cleanup_result_color_kb "$total_size_kb")
+                echo -e "  ${line_color}${ICON_SUCCESS}${NC} $label${NC}, ${line_color}$size_human${NC}"
+            fi
         fi
         files_cleaned=$((files_cleaned + total_count))
         total_size_cleaned=$((total_size_cleaned + total_size_kb))
@@ -748,6 +1285,22 @@ start_cleanup() {
     export MOLE_CURRENT_COMMAND="clean"
     log_operation_session_start "clean"
     DRY_RUN_SEEN_IDENTITIES=()
+
+    if clean_machine_mode_enabled; then
+        export MOLE_SILENT_STDIO=1
+        MOLE_MACHINE_SILENT_STDIO=1
+        if [[ -n "$EXTERNAL_VOLUME_TARGET" ]]; then
+            MOLE_SCOPE_EFFECTIVE="external"
+        fi
+        if [[ "$MOLE_SCOPE" == "system" ]]; then
+            SYSTEM_CLEAN=true
+        elif [[ "$MOLE_SCOPE" == "user" ]]; then
+            SYSTEM_CLEAN=false
+        elif [[ "$MOLE_SCOPE" == "all" ]]; then
+            SYSTEM_CLEAN=true
+        fi
+        return 0
+    fi
 
     if [[ -t 1 ]]; then
         printf '\033[2J\033[H'
@@ -866,7 +1419,7 @@ perform_cleanup() {
 
     # Test mode skips expensive scans and returns minimal output.
     local test_mode_enabled=false
-    if [[ -z "$EXTERNAL_VOLUME_TARGET" && "${MOLE_TEST_MODE:-0}" == "1" ]]; then
+    if [[ -z "$EXTERNAL_VOLUME_TARGET" && "${MOLE_TEST_MODE:-0}" == "1" && ! clean_machine_mode_enabled ]]; then
         test_mode_enabled=true
         if [[ "$DRY_RUN" == "true" ]]; then
             echo -e "${YELLOW}Dry Run Mode${NC}, Preview only, no deletions"
@@ -900,7 +1453,7 @@ perform_cleanup() {
         total_size_cleaned=0
     fi
 
-    if [[ "$test_mode_enabled" == "false" && -z "$EXTERNAL_VOLUME_TARGET" ]]; then
+    if [[ "$test_mode_enabled" == "false" && -z "$EXTERNAL_VOLUME_TARGET" && ! clean_machine_mode_enabled ]]; then
         echo -e "${BLUE}${ICON_ADMIN}${NC} $(detect_architecture) | Free space: $(get_free_space)"
     fi
 
@@ -909,14 +1462,18 @@ perform_cleanup() {
         local -a summary_details
         summary_details=()
         summary_details+=("Test mode - no actual cleanup performed")
-        print_summary_block "$summary_heading" "${summary_details[@]}"
-        printf '\n'
+        if ! clean_machine_mode_enabled; then
+            print_summary_block "$summary_heading" "${summary_details[@]}"
+            printf '\n'
+        fi
         return 0
     fi
 
     # Pre-check TCC permissions to avoid mid-run prompts.
-    if [[ -z "$EXTERNAL_VOLUME_TARGET" ]]; then
-        check_tcc_permissions
+    if [[ -z "$EXTERNAL_VOLUME_TARGET" && "$MOLE_OUTPUT_MODE" != "preflight" ]]; then
+        if ! clean_machine_mode_enabled; then
+            check_tcc_permissions
+        fi
     fi
 
     if [[ ${#WHITELIST_PATTERNS[@]} -gt 0 ]]; then
@@ -947,9 +1504,11 @@ perform_cleanup() {
             [[ $custom_count -gt 0 ]] && summary+="$custom_count custom"
             summary+=" patterns active"
 
-            echo -e "${BLUE}${ICON_SUCCESS}${NC} Whitelist: $summary"
+            if ! clean_machine_mode_enabled; then
+                echo -e "${BLUE}${ICON_SUCCESS}${NC} Whitelist: $summary"
+            fi
 
-            if [[ "$DRY_RUN" == "true" ]]; then
+            if [[ "$DRY_RUN" == "true" && ! clean_machine_mode_enabled ]]; then
                 for pattern in "${WHITELIST_PATTERNS[@]}"; do
                     [[ "$pattern" == "$FINDER_METADATA_SENTINEL" ]] && continue
                     echo -e "  ${GRAY}${ICON_SUBLIST}${NC} ${GRAY}${pattern}${NC}"
@@ -958,7 +1517,7 @@ perform_cleanup() {
         fi
     fi
 
-    if [[ -t 1 && "$DRY_RUN" != "true" ]]; then
+    if [[ -t 1 && "$DRY_RUN" != "true" && ! clean_machine_mode_enabled ]]; then
         local fda_status=0
         has_full_disk_access
         fda_status=$?
@@ -978,178 +1537,135 @@ perform_cleanup() {
     # Allow per-section failures without aborting the full run.
     set +e
 
-    if [[ -n "$EXTERNAL_VOLUME_TARGET" ]]; then
-        start_section "External volume"
-        clean_external_volume_target "$EXTERNAL_VOLUME_TARGET"
-        end_section
-    else
-        # ===== 1. System =====
-        if [[ "$SYSTEM_CLEAN" == "true" ]]; then
-            start_section "System"
-            clean_deep_system
-            clean_local_snapshots
-            end_section
-        fi
-
-        if [[ ${#WHITELIST_WARNINGS[@]} -gt 0 ]]; then
-            echo ""
-            for warning in "${WHITELIST_WARNINGS[@]}"; do
-                echo -e "  ${GRAY}${ICON_WARNING}${NC} Whitelist: $warning"
-            done
-        fi
-
-        # ===== 2. User essentials =====
-        start_section "User essentials"
-        clean_user_essentials
-        clean_finder_metadata
-        end_section
-
-        # ===== 3. App caches (merged sandboxed and standard app caches) =====
-        start_section "App caches"
-        clean_app_caches
-        end_section
-
-        # ===== 4. Browsers =====
-        start_section "Browsers"
-        clean_browsers
-        end_section
-
-        # ===== 5. Cloud & Office =====
-        start_section "Cloud & Office"
-        clean_cloud_storage
-        clean_office_applications
-        end_section
-
-        # ===== 6. Developer tools (merged CLI and GUI tooling) =====
-        start_section "Developer tools"
-        clean_developer_tools
-        end_section
-
-        # ===== 7. Applications =====
-        start_section "Applications"
-        clean_user_gui_applications
-        end_section
-
-        # ===== 8. Virtualization =====
-        start_section "Virtualization"
-        clean_virtualization_tools
-        end_section
-
-        # ===== 9. Application Support =====
-        start_section "Application Support"
-        clean_application_support_logs
-        end_section
-
-        # ===== 10. Orphaned data =====
-        start_section "Orphaned data"
-        clean_orphaned_app_data
-        clean_orphaned_system_services
-        show_user_launch_agent_hint_notice
-        end_section
-
-        # ===== 11. Apple Silicon =====
-        clean_apple_silicon_caches
-
-        # ===== 12. Device backups =====
-        start_section "Device backups"
-        check_ios_device_backups
-        end_section
-
-        # ===== 13. Time Machine =====
-        start_section "Time Machine"
-        clean_time_machine_failed_backups
-        end_section
-
-        # ===== 14. Large files =====
-        start_section "Large files"
-        check_large_file_candidates
-        end_section
-
-        # ===== 15. System Data clues =====
-        start_section "System Data clues"
-        show_system_data_hint_notice
-        end_section
-
-        # ===== 16. Project artifacts =====
-        start_section "Project artifacts"
-        show_project_artifact_hint_notice
-        end_section
+    if ! clean_machine_mode_enabled && [[ ${#WHITELIST_WARNINGS[@]} -gt 0 ]]; then
+        echo ""
+        local warning
+        for warning in "${WHITELIST_WARNINGS[@]}"; do
+            echo -e "  ${GRAY}${ICON_WARNING}${NC} Whitelist: $warning"
+        done
     fi
+
+    local run_rc=0
+    clean_run_selected_sections || run_rc=$?
 
     # ===== Final summary =====
-    echo ""
+    if ! clean_machine_mode_enabled; then
+        echo ""
 
-    local summary_heading=""
-    local summary_status="success"
-    if [[ "$DRY_RUN" == "true" ]]; then
-        summary_heading="Dry run complete - no changes made"
-    else
-        summary_heading="Cleanup complete"
-    fi
-
-    local -a summary_details=()
-
-    if [[ $total_size_cleaned -gt 0 ]]; then
-        local freed_size_human
-        freed_size_human=$(bytes_to_human_kb "$total_size_cleaned")
-
+        local summary_heading=""
+        local summary_status="success"
         if [[ "$DRY_RUN" == "true" ]]; then
-            local stats="Potential space: ${GREEN}${freed_size_human}${NC}"
-            [[ $files_cleaned -gt 0 ]] && stats+=" | Items: $files_cleaned"
-            [[ $total_items -gt 0 ]] && stats+=" | Categories: $total_items"
-            summary_details+=("$stats")
-
-            {
-                echo ""
-                echo "# ============================================"
-                echo "# Summary"
-                echo "# ============================================"
-                echo "# Potential cleanup: ${freed_size_human}"
-                echo "# Items: $files_cleaned"
-                echo "# Categories: $total_items"
-            } >> "$EXPORT_LIST_FILE"
-
-            summary_details+=("Detailed file list: ${GRAY}$EXPORT_LIST_FILE${NC}")
-            summary_details+=("Use ${GRAY}mo clean --whitelist${NC} to add protection rules")
+            summary_heading="Dry run complete - no changes made"
         else
-            local summary_line="Space freed: ${GREEN}${freed_size_human}${NC}"
+            summary_heading="Cleanup complete"
+        fi
 
-            if [[ $files_cleaned -gt 0 && $total_items -gt 0 ]]; then
-                summary_line+=" | Items cleaned: $files_cleaned | Categories: $total_items"
-            elif [[ $files_cleaned -gt 0 ]]; then
-                summary_line+=" | Items cleaned: $files_cleaned"
-            elif [[ $total_items -gt 0 ]]; then
-                summary_line+=" | Categories: $total_items"
-            fi
+        local -a summary_details=()
 
-            summary_details+=("$summary_line")
+        if [[ $total_size_cleaned -gt 0 ]]; then
+            local freed_size_human
+            freed_size_human=$(bytes_to_human_kb "$total_size_cleaned")
 
-            # Movie comparison only if >= 1GB
-            if ((total_size_cleaned >= MOLE_ONE_GIB_KB)); then
-                local freed_gb=$((total_size_cleaned / MOLE_ONE_GIB_KB))
-                local movies=$((freed_gb * 10 / 45))
+            if [[ "$DRY_RUN" == "true" ]]; then
+                local stats="Potential space: ${GREEN}${freed_size_human}${NC}"
+                [[ $files_cleaned -gt 0 ]] && stats+=" | Items: $files_cleaned"
+                [[ $total_items -gt 0 ]] && stats+=" | Categories: $total_items"
+                summary_details+=("$stats")
 
-                if [[ $movies -gt 0 ]]; then
-                    if [[ $movies -eq 1 ]]; then
-                        summary_details+=("Equivalent to ~$movies 4K movie of storage.")
-                    else
-                        summary_details+=("Equivalent to ~$movies 4K movies of storage.")
+                {
+                    echo ""
+                    echo "# ============================================"
+                    echo "# Summary"
+                    echo "# ============================================"
+                    echo "# Potential cleanup: ${freed_size_human}"
+                    echo "# Items: $files_cleaned"
+                    echo "# Categories: $total_items"
+                } >> "$EXPORT_LIST_FILE"
+
+                summary_details+=("Detailed file list: ${GRAY}$EXPORT_LIST_FILE${NC}")
+                summary_details+=("Use ${GRAY}mo clean --whitelist${NC} to add protection rules")
+            else
+                local summary_line="Space freed: ${GREEN}${freed_size_human}${NC}"
+
+                if [[ $files_cleaned -gt 0 && $total_items -gt 0 ]]; then
+                    summary_line+=" | Items cleaned: $files_cleaned | Categories: $total_items"
+                elif [[ $files_cleaned -gt 0 ]]; then
+                    summary_line+=" | Items cleaned: $files_cleaned"
+                elif [[ $total_items -gt 0 ]]; then
+                    summary_line+=" | Categories: $total_items"
+                fi
+
+                summary_details+=("$summary_line")
+
+                if ((total_size_cleaned >= MOLE_ONE_GIB_KB)); then
+                    local freed_gb=$((total_size_cleaned / MOLE_ONE_GIB_KB))
+                    local movies=$((freed_gb * 10 / 45))
+
+                    if [[ $movies -gt 0 ]]; then
+                        if [[ $movies -eq 1 ]]; then
+                            summary_details+=("Equivalent to ~$movies 4K movie of storage.")
+                        else
+                            summary_details+=("Equivalent to ~$movies 4K movies of storage.")
+                        fi
                     fi
                 fi
-            fi
 
-            local final_free_space
-            final_free_space=$(get_free_space)
-            summary_details+=("Free space now: $final_free_space")
-        fi
-    else
-        summary_status="info"
-        if [[ "$DRY_RUN" == "true" ]]; then
-            summary_details+=("No significant reclaimable space detected, system already clean.")
+                local final_free_space
+                final_free_space=$(get_free_space)
+                summary_details+=("Free space now: $final_free_space")
+            fi
         else
-            summary_details+=("System was already clean; no additional space freed.")
+            summary_status="info"
+            if [[ "$DRY_RUN" == "true" ]]; then
+                summary_details+=("No significant reclaimable space detected, system already clean.")
+            else
+                summary_details+=("System was already clean; no additional space freed.")
+            fi
+            summary_details+=("Free space now: $(get_free_space)")
         fi
-        summary_details+=("Free space now: $(get_free_space)")
+
+        print_summary_block "$summary_heading" "${summary_details[@]}"
+        printf '\n'
+    else
+        local steps_ok=0
+        local steps_blocked=0
+        local steps_failed=0
+        local step_json status_value
+        for step_json in "${MOLE_MACHINE_STEP_RESULTS_JSON[@]-}"; do
+            status_value=$(printf '%s' "$step_json" | sed -n 's/.*"status":"\([^"]*\)".*/\1/p')
+            case "$status_value" in
+                ok) steps_ok=$((steps_ok + 1)) ;;
+                blocked) steps_blocked=$((steps_blocked + 1)) ;;
+                failed) steps_failed=$((steps_failed + 1)) ;;
+            esac
+        done
+
+        local final_status="ok"
+        if [[ "$MOLE_OUTPUT_MODE" == "preflight" ]]; then
+            [[ $steps_blocked -gt 0 ]] && final_status="blocked"
+        elif [[ $run_rc -eq 4 ]]; then
+            final_status="blocked"
+        elif [[ $run_rc -ne 0 ]]; then
+            final_status="failed"
+        elif [[ $steps_failed -gt 0 || $steps_blocked -gt 0 ]]; then
+            final_status="partial"
+        fi
+
+        local candidates_json='[]'
+        local machine_candidate_count=0
+        local candidate_entry
+        for candidate_entry in "${MOLE_MACHINE_PLAN_CANDIDATES_JSON[@]-}"; do
+            [[ -n "$candidate_entry" ]] && machine_candidate_count=$((machine_candidate_count + 1))
+        done
+        if [[ $machine_candidate_count -gt 0 ]]; then
+            candidates_json=$(mole_machine_json_array_from_lines "${MOLE_MACHINE_PLAN_CANDIDATES_JSON[@]-}")
+        fi
+
+        local summary_json
+        summary_json=$(mole_machine_build_final_result_json "$final_status" "$((total_size_cleaned * 1024))" "$files_cleaned" "$whitelist_skipped_count" "${MOLE_PERMISSION_DENIED_COUNT:-0}" "$steps_ok" "$steps_blocked" "$steps_failed" "$candidates_json")
+        mole_machine_emit "result" "$summary_json"
+        [[ -n "$MOLE_SUMMARY_FILE" ]] && mole_machine_write_json_file "$MOLE_SUMMARY_FILE" "$summary_json"
+        [[ -n "$MOLE_PLAN_FILE" ]] && mole_machine_write_json_file "$MOLE_PLAN_FILE" "$summary_json"
     fi
 
     if [[ $had_errexit -eq 1 ]]; then
@@ -1159,11 +1675,14 @@ perform_cleanup() {
     # Log session end with summary
     log_operation_session_end "clean" "$files_cleaned" "$total_size_cleaned"
 
-    print_summary_block "$summary_heading" "${summary_details[@]}"
-    printf '\n'
+    if clean_machine_mode_enabled; then
+        return "$run_rc"
+    fi
+    return 0
 }
 
 main() {
+    local original_args=("$@")
     while [[ $# -gt 0 ]]; do
         case "$1" in
             "--help" | "-h")
@@ -1177,11 +1696,93 @@ main() {
                 DRY_RUN=true
                 export MOLE_DRY_RUN=1
                 ;;
+            "--interface")
+                shift
+                [[ $# -eq 0 ]] && {
+                    echo "Missing value for --interface" >&2
+                    exit 2
+                }
+                MOLE_INTERFACE="$1"
+                ;;
+            "--preflight")
+                MOLE_OUTPUT_MODE="preflight"
+                ;;
+            "--scope")
+                shift
+                [[ $# -eq 0 ]] && {
+                    echo "Missing value for --scope" >&2
+                    exit 2
+                }
+                MOLE_SCOPE="$1"
+                ;;
+            "--steps")
+                shift
+                [[ $# -eq 0 ]] && {
+                    echo "Missing value for --steps" >&2
+                    exit 2
+                }
+                MOLE_SELECTED_STEPS_CSV="$1"
+                ;;
+            "--blocking-policy")
+                shift
+                [[ $# -eq 0 ]] && {
+                    echo "Missing value for --blocking-policy" >&2
+                    exit 2
+                }
+                MOLE_BLOCKING_POLICY="$1"
+                ;;
+            "--events-file")
+                shift
+                [[ $# -eq 0 ]] && {
+                    echo "Missing value for --events-file" >&2
+                    exit 2
+                }
+                MOLE_EVENTS_FILE="$1"
+                ;;
+            "--summary-file")
+                shift
+                [[ $# -eq 0 ]] && {
+                    echo "Missing value for --summary-file" >&2
+                    exit 2
+                }
+                MOLE_SUMMARY_FILE="$1"
+                ;;
+            "--plan-file")
+                shift
+                [[ $# -eq 0 ]] && {
+                    echo "Missing value for --plan-file" >&2
+                    exit 2
+                }
+                MOLE_PLAN_FILE="$1"
+                ;;
+            "--run-id")
+                shift
+                [[ $# -eq 0 ]] && {
+                    echo "Missing value for --run-id" >&2
+                    exit 2
+                }
+                MOLE_RUN_ID="$1"
+                export MOLE_RUN_ID
+                ;;
+            "--item-events")
+                shift
+                [[ $# -eq 0 ]] && {
+                    echo "Missing value for --item-events" >&2
+                    exit 2
+                }
+                MOLE_ITEM_EVENTS="$1"
+                ;;
+            "--non-interactive")
+                :
+                ;;
+            "--no-color" | "--no-spinner")
+                :
+                ;;
             "--external")
                 shift
                 if [[ $# -eq 0 ]]; then
                     echo "Missing path for --external" >&2
-                    exit 1
+                    exit 2
                 fi
                 EXTERNAL_VOLUME_TARGET=$(validate_external_volume_target "$1") || exit 1
                 ;;
@@ -1190,15 +1791,95 @@ main() {
                 manage_whitelist "clean"
                 exit 0
                 ;;
+            *)
+                echo "Unknown clean option: $1" >&2
+                exit 2
+                ;;
         esac
         shift
     done
 
+    case "$MOLE_INTERFACE" in
+        human | jsonl) ;;
+        *)
+            echo "Unsupported --interface: $MOLE_INTERFACE" >&2
+            exit 2
+            ;;
+    esac
+
+    case "$MOLE_SCOPE" in
+        all | user | system | external) ;;
+        *)
+            echo "Unsupported --scope: $MOLE_SCOPE" >&2
+            exit 2
+            ;;
+    esac
+
+    case "$MOLE_BLOCKING_POLICY" in
+        skip | fail) ;;
+        *)
+            echo "Unsupported --blocking-policy: $MOLE_BLOCKING_POLICY" >&2
+            exit 2
+            ;;
+    esac
+
+    case "$MOLE_ITEM_EVENTS" in
+        none | grouped | all) ;;
+        *)
+            echo "Unsupported --item-events: $MOLE_ITEM_EVENTS" >&2
+            exit 2
+            ;;
+    esac
+
+    if [[ "$MOLE_OUTPUT_MODE" == "preflight" && "$DRY_RUN" == "true" ]]; then
+        echo "--preflight cannot be combined with --dry-run" >&2
+        exit 2
+    fi
+
+    if [[ "$DRY_RUN" == "true" && "$MOLE_OUTPUT_MODE" != "preflight" ]]; then
+        MOLE_OUTPUT_MODE="plan"
+    fi
+
+    if [[ -n "$MOLE_PLAN_FILE" && "$DRY_RUN" != "true" ]]; then
+        echo "--plan-file requires --dry-run" >&2
+        exit 2
+    fi
+
+    if [[ "$MOLE_INTERFACE" == "jsonl" ]]; then
+        export MOLE_SILENT_STDIO=1
+        export MOLE_MACHINE_SILENT_STDIO=1
+        export NO_COLOR=1
+    fi
+
+    clean_resolve_selected_steps
+    if [[ $(clean_selected_step_count) -eq 0 ]]; then
+        echo "No clean steps selected" >&2
+        exit 2
+    fi
+
+    if clean_machine_mode_enabled; then
+        mole_machine_init_output
+        if [[ -z "$MOLE_EVENTS_FILE" ]]; then
+            exec 3>&1
+            MOLE_MACHINE_STDOUT_FD=3
+        fi
+        clean_emit_run_context "${original_args[@]}"
+        clean_emit_capabilities
+    fi
+
     start_cleanup
-    hide_cursor
-    perform_cleanup
-    show_cursor
-    exit 0
+    if ! clean_machine_mode_enabled; then
+        clean_resolve_selected_steps
+    fi
+    if ! clean_machine_mode_enabled; then
+        hide_cursor
+    fi
+    local run_status=0
+    perform_cleanup || run_status=$?
+    if ! clean_machine_mode_enabled; then
+        show_cursor
+    fi
+    exit "$run_status"
 }
 
 main "$@"

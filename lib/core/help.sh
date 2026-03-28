@@ -10,6 +10,17 @@ show_clean_help() {
     echo "  --external PATH   Clean OS metadata from a mounted external volume"
     echo "  --whitelist       Manage protected paths"
     echo "  --debug           Show detailed operation logs"
+    echo "  --interface MODE  Output mode: human or jsonl"
+    echo "  --preflight       Discover selected steps and required capabilities"
+    echo "  --scope SCOPE     Scope: user, system, all, or external"
+    echo "  --steps CSV       Run only specific clean step IDs"
+    echo "  --blocking-policy Policy when required capability is missing: skip or fail"
+    echo "  --events-file     Write JSONL events to a file"
+    echo "  --summary-file    Write final JSON summary to a file"
+    echo "  --plan-file       Write final dry-run JSON plan to a file"
+    echo "  --run-id ID       Use a caller-provided run identifier"
+    echo "  --item-events     Event detail: none, grouped, or all"
+    echo "  --non-interactive Disable prompts (implied by --interface jsonl)"
     echo "  -h, --help        Show this help message"
 }
 

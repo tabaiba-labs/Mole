@@ -6,6 +6,10 @@ set -euo pipefail
 clean_tool_cache() {
     local description="$1"
     shift
+    local logical_candidate_id=""
+    if [[ "${MOLE_INTERFACE:-human}" == "jsonl" && "${MOLE_ITEM_EVENTS:-grouped}" != "none" ]]; then
+        logical_candidate_id=$(mole_machine_candidate_id_for_logical "$(printf '%s' "$description" | tr '[:upper:]' '[:lower:]' | tr -cs 'a-z0-9' '-')")
+    fi
     if [[ "$DRY_RUN" != "true" ]]; then
         local command_succeeded=false
         if [[ -t 1 ]]; then
@@ -18,9 +22,17 @@ clean_tool_cache() {
             stop_section_spinner
         fi
         if [[ "$command_succeeded" == "true" ]]; then
+            if [[ -n "$logical_candidate_id" ]]; then
+                mole_machine_candidate_found "$logical_candidate_id" "$description" "logical" "run_command" "$description" "$description" "logical" 0 1 "" '{}'
+                mole_machine_item_result "$logical_candidate_id" "$description" "cleaned" 0 1 "" 0
+            fi
             echo -e "  ${GREEN}${ICON_SUCCESS}${NC} $description"
         fi
     else
+        if [[ -n "$logical_candidate_id" ]]; then
+            mole_machine_candidate_found "$logical_candidate_id" "$description" "logical" "run_command" "$description" "$description" "logical" 0 1 "" '{}'
+            mole_machine_item_result "$logical_candidate_id" "$description" "would_clean" 0 1 "" 0
+        fi
         echo -e "  ${YELLOW}${ICON_DRY_RUN}${NC} $description · would clean"
     fi
     return 0
@@ -205,6 +217,12 @@ check_multiple_versions() {
 
     if [[ "$count" -gt 1 ]]; then
         note_activity
+        if [[ "${MOLE_INTERFACE:-human}" == "jsonl" && "${MOLE_ITEM_EVENTS:-grouped}" != "none" ]]; then
+            local candidate_id
+            candidate_id=$(mole_machine_candidate_id_for_logical "$(printf '%s' "$tool_name" | tr '[:upper:]' '[:lower:]' | tr -cs 'a-z0-9' '-')")
+            mole_machine_candidate_found "$candidate_id" "$tool_name" "logical" "report" "$dir" "$dir" "directory" 0 "$count" "" '{}'
+            mole_machine_item_result "$candidate_id" "$tool_name" "reported" 0 "$count" "" 0
+        fi
         local hint=""
         if [[ -n "$list_cmd" ]]; then
             hint=" · ${GRAY}${list_cmd}${NC}"

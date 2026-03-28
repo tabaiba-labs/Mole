@@ -186,6 +186,11 @@ validate_path_for_deletion() {
 safe_remove() {
     local path="$1"
     local silent="${2:-false}"
+    local emit_all_items=false
+
+    if [[ "${MOLE_INTERFACE:-human}" == "jsonl" && "${MOLE_ITEM_EVENTS:-grouped}" == "all" ]]; then
+        emit_all_items=true
+    fi
 
     # Validate path
     if ! validate_path_for_deletion "$path"; then
@@ -199,6 +204,14 @@ safe_remove() {
 
     # Dry-run mode: log but don't delete
     if [[ "${MOLE_DRY_RUN:-0}" == "1" ]]; then
+        if [[ "$emit_all_items" == "true" ]]; then
+            local dry_size_kb=0
+            if [[ -e "$path" ]]; then
+                dry_size_kb=$(get_path_size_kb "$path" 2> /dev/null || echo "0")
+            fi
+            mole_machine_candidate_found "$(mole_machine_candidate_id_for_path "$path")" "$(basename "$path")" "path" "delete_path" "$path" "$path" "$([[ -d "$path" ]] && echo directory || echo file)" "$((dry_size_kb * 1024))" 1 "" '{}'
+            mole_machine_item_result "$(mole_machine_candidate_id_for_path "$path")" "$(basename "$path")" "would_clean" "$((dry_size_kb * 1024))" 1 "" 0
+        fi
         if [[ "${MO_DEBUG:-}" == "1" ]]; then
             local file_type="file"
             [[ -d "$path" ]] && file_type="directory"
@@ -260,6 +273,9 @@ safe_remove() {
     if [[ $rm_exit -eq 0 ]]; then
         # Log successful removal
         log_operation "${MOLE_CURRENT_COMMAND:-clean}" "REMOVED" "$path" "$size_human"
+        if [[ "$emit_all_items" == "true" ]]; then
+            mole_machine_item_result "$(mole_machine_candidate_id_for_path "$path")" "$(basename "$path")" "deleted" "$((size_kb * 1024))" 1 "" 0
+        fi
         return 0
     else
         # Check if it's a permission error
@@ -269,9 +285,15 @@ safe_remove() {
             export MOLE_PERMISSION_DENIED_COUNT
             debug_log "Permission denied: $path, may need Full Disk Access"
             log_operation "${MOLE_CURRENT_COMMAND:-clean}" "FAILED" "$path" "permission denied"
+            if [[ "$emit_all_items" == "true" ]]; then
+                mole_machine_item_result "$(mole_machine_candidate_id_for_path "$path")" "$(basename "$path")" "failed" 0 1 "permission_denied" 0
+            fi
         else
             [[ "$silent" != "true" ]] && log_error "Failed to remove: $path"
             log_operation "${MOLE_CURRENT_COMMAND:-clean}" "FAILED" "$path" "error"
+            if [[ "$emit_all_items" == "true" ]]; then
+                mole_machine_item_result "$(mole_machine_candidate_id_for_path "$path")" "$(basename "$path")" "failed" 0 1 "io_error" 0
+            fi
         fi
         return 1
     fi
@@ -310,6 +332,11 @@ safe_remove_symlink() {
 # Safe sudo removal with symlink protection
 safe_sudo_remove() {
     local path="$1"
+    local emit_all_items=false
+
+    if [[ "${MOLE_INTERFACE:-human}" == "jsonl" && "${MOLE_ITEM_EVENTS:-grouped}" == "all" ]]; then
+        emit_all_items=true
+    fi
 
     if ! validate_path_for_deletion "$path"; then
         log_error "Path validation failed for sudo remove: $path"
@@ -326,6 +353,14 @@ safe_sudo_remove() {
     fi
 
     if [[ "${MOLE_DRY_RUN:-0}" == "1" ]]; then
+        if [[ "$emit_all_items" == "true" ]]; then
+            local dry_size_kb=0
+            if sudo test -e "$path" 2> /dev/null; then
+                dry_size_kb=$(sudo du -skP "$path" 2> /dev/null | awk '{print $1}' || echo "0")
+            fi
+            mole_machine_candidate_found "$(mole_machine_candidate_id_for_path "$path")" "$(basename "$path")" "path" "delete_path" "$path" "$path" "$([[ -d "$path" ]] && echo directory || echo file)" "$((dry_size_kb * 1024))" 1 "sudo.session" '{}'
+            mole_machine_item_result "$(mole_machine_candidate_id_for_path "$path")" "$(basename "$path")" "would_clean" "$((dry_size_kb * 1024))" 1 "" 0
+        fi
         if [[ "${MO_DEBUG:-}" == "1" ]]; then
             local file_type="file"
             [[ -d "$path" ]] && file_type="directory"
@@ -378,25 +413,40 @@ safe_sudo_remove() {
 
     if [[ $ret -eq 0 ]]; then
         log_operation "${MOLE_CURRENT_COMMAND:-clean}" "REMOVED" "$path" "$size_human"
+        if [[ "$emit_all_items" == "true" ]]; then
+            mole_machine_item_result "$(mole_machine_candidate_id_for_path "$path")" "$(basename "$path")" "deleted" "$((size_kb * 1024))" 1 "" 0
+        fi
         return 0
     fi
 
     case "$output" in
         *"Operation not permitted"*)
             log_operation "${MOLE_CURRENT_COMMAND:-clean}" "FAILED" "$path" "sip/mdm protected"
+            if [[ "$emit_all_items" == "true" ]]; then
+                mole_machine_item_result "$(mole_machine_candidate_id_for_path "$path")" "$(basename "$path")" "failed" 0 1 "permission_denied" 0
+            fi
             return "$MOLE_ERR_SIP_PROTECTED"
             ;;
         *"Read-only file system"*)
             log_operation "${MOLE_CURRENT_COMMAND:-clean}" "FAILED" "$path" "readonly filesystem"
+            if [[ "$emit_all_items" == "true" ]]; then
+                mole_machine_item_result "$(mole_machine_candidate_id_for_path "$path")" "$(basename "$path")" "failed" 0 1 "io_error" 0
+            fi
             return "$MOLE_ERR_READONLY_FS"
             ;;
         *"Sorry, try again"* | *"incorrect passphrase"* | *"incorrect credentials"*)
             log_operation "${MOLE_CURRENT_COMMAND:-clean}" "FAILED" "$path" "auth failed"
+            if [[ "$emit_all_items" == "true" ]]; then
+                mole_machine_item_result "$(mole_machine_candidate_id_for_path "$path")" "$(basename "$path")" "failed" 0 1 "auth_failed" 0
+            fi
             return "$MOLE_ERR_AUTH_FAILED"
             ;;
         *)
             log_error "Failed to remove, sudo: $path"
             log_operation "${MOLE_CURRENT_COMMAND:-clean}" "FAILED" "$path" "sudo error"
+            if [[ "$emit_all_items" == "true" ]]; then
+                mole_machine_item_result "$(mole_machine_candidate_id_for_path "$path")" "$(basename "$path")" "failed" 0 1 "io_error" 0
+            fi
             return 1
             ;;
     esac
@@ -438,12 +488,30 @@ safe_find_delete() {
     fi
 
     # Iterate results to respect should_protect_path
+    local matched_count=0
+    local matched_bytes=0
     while IFS= read -r -d '' match; do
         if should_protect_path "$match"; then
             continue
         fi
+        matched_count=$((matched_count + 1))
+        local size_kb=0
+        size_kb=$(get_path_size_kb "$match" 2> /dev/null || echo "0")
+        [[ "$size_kb" =~ ^[0-9]+$ ]] || size_kb=0
+        matched_bytes=$((matched_bytes + (size_kb * 1024)))
         safe_remove "$match" true || true
     done < <(command find "$base_dir" "${find_args[@]}" -print0 2> /dev/null || true)
+
+    if [[ "${MOLE_INTERFACE:-human}" == "jsonl" && "${MOLE_ITEM_EVENTS:-grouped}" == "grouped" && $matched_count -gt 0 ]]; then
+        local candidate_id
+        candidate_id=$(mole_machine_candidate_id_for_logical "find-delete-${pattern//[^a-zA-Z0-9]/-}")
+        mole_machine_candidate_found "$candidate_id" "${MOLE_CLEAN_CURRENT_STEP_LABEL:-$pattern}" "logical" "delete_path" "$base_dir" "$base_dir" "$([[ "$type_filter" == "d" ]] && echo directory || echo file)" "$matched_bytes" "$matched_count" "" '{}'
+        if [[ "${MOLE_DRY_RUN:-0}" == "1" ]]; then
+            mole_machine_item_result "$candidate_id" "${MOLE_CLEAN_CURRENT_STEP_LABEL:-$pattern}" "would_clean" "$matched_bytes" "$matched_count" "" 0
+        else
+            mole_machine_item_result "$candidate_id" "${MOLE_CLEAN_CURRENT_STEP_LABEL:-$pattern}" "cleaned" "$matched_bytes" "$matched_count" "" 0
+        fi
+    fi
 
     return 0
 }
@@ -485,12 +553,30 @@ safe_sudo_find_delete() {
     fi
 
     # Iterate results to respect should_protect_path
+    local matched_count=0
+    local matched_bytes=0
     while IFS= read -r -d '' match; do
         if should_protect_path "$match"; then
             continue
         fi
+        matched_count=$((matched_count + 1))
+        local size_kb=0
+        size_kb=$(sudo du -skP "$match" 2> /dev/null | awk '{print $1}' || echo "0")
+        [[ "$size_kb" =~ ^[0-9]+$ ]] || size_kb=0
+        matched_bytes=$((matched_bytes + (size_kb * 1024)))
         safe_sudo_remove "$match" || true
     done < <(sudo find "$base_dir" "${find_args[@]}" -print0 2> /dev/null || true)
+
+    if [[ "${MOLE_INTERFACE:-human}" == "jsonl" && "${MOLE_ITEM_EVENTS:-grouped}" == "grouped" && $matched_count -gt 0 ]]; then
+        local candidate_id
+        candidate_id=$(mole_machine_candidate_id_for_logical "sudo-find-delete-${pattern//[^a-zA-Z0-9]/-}")
+        mole_machine_candidate_found "$candidate_id" "${MOLE_CLEAN_CURRENT_STEP_LABEL:-$pattern}" "logical" "delete_path" "$base_dir" "$base_dir" "$([[ "$type_filter" == "d" ]] && echo directory || echo file)" "$matched_bytes" "$matched_count" "sudo.session" '{}'
+        if [[ "${MOLE_DRY_RUN:-0}" == "1" ]]; then
+            mole_machine_item_result "$candidate_id" "${MOLE_CLEAN_CURRENT_STEP_LABEL:-$pattern}" "would_clean" "$matched_bytes" "$matched_count" "" 0
+        else
+            mole_machine_item_result "$candidate_id" "${MOLE_CLEAN_CURRENT_STEP_LABEL:-$pattern}" "cleaned" "$matched_bytes" "$matched_count" "" 0
+        fi
+    fi
 
     return 0
 }

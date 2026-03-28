@@ -94,7 +94,9 @@ get_timestamp() {
 
 # Log informational message
 log_info() {
-    echo -e "${BLUE}$1${NC}"
+    if [[ "${MOLE_SILENT_STDIO:-0}" != "1" ]]; then
+        echo -e "${BLUE}$1${NC}"
+    fi
     local timestamp
     timestamp=$(get_timestamp)
     append_log_line "$LOG_FILE" "[$timestamp] INFO: $1"
@@ -105,7 +107,9 @@ log_info() {
 
 # Log success message
 log_success() {
-    echo -e "  ${GREEN}${ICON_SUCCESS}${NC} $1"
+    if [[ "${MOLE_SILENT_STDIO:-0}" != "1" ]]; then
+        echo -e "  ${GREEN}${ICON_SUCCESS}${NC} $1"
+    fi
     local timestamp
     timestamp=$(get_timestamp)
     append_log_line "$LOG_FILE" "[$timestamp] SUCCESS: $1"
@@ -116,7 +120,9 @@ log_success() {
 
 # shellcheck disable=SC2329
 log_warning() {
-    echo -e "${YELLOW}$1${NC}"
+    if [[ "${MOLE_SILENT_STDIO:-0}" != "1" ]]; then
+        echo -e "${YELLOW}$1${NC}"
+    fi
     local timestamp
     timestamp=$(get_timestamp)
     append_log_line "$LOG_FILE" "[$timestamp] WARNING: $1"
@@ -127,7 +133,9 @@ log_warning() {
 
 # shellcheck disable=SC2329
 log_error() {
-    echo -e "${YELLOW}${ICON_ERROR}${NC} $1" >&2
+    if [[ "${MOLE_SILENT_STDIO:-0}" != "1" ]]; then
+        echo -e "${YELLOW}${ICON_ERROR}${NC} $1" >&2
+    fi
     local timestamp
     timestamp=$(get_timestamp)
     append_log_line "$LOG_FILE" "[$timestamp] ERROR: $1"
@@ -139,7 +147,9 @@ log_error() {
 # shellcheck disable=SC2329
 debug_log() {
     if [[ "${MO_DEBUG:-}" == "1" ]]; then
-        echo -e "${GRAY}[DEBUG]${NC} $*" >&2
+        if [[ "${MOLE_SILENT_STDIO:-0}" != "1" ]]; then
+            echo -e "${GRAY}[DEBUG]${NC} $*" >&2
+        fi
         local timestamp
         timestamp=$(get_timestamp)
         append_log_line "$DEBUG_LOG_FILE" "[$timestamp] DEBUG: $*"

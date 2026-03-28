@@ -7,6 +7,21 @@
 ehthumbs.db
 Thumbs.db
 
+# Xcode / SwiftPM
+DerivedData/
+build/
+.build/
+*.xcodeproj/project.xcworkspace/xcuserdata/
+*.xcodeproj/xcuserdata/
+*.xcworkspace/xcuserdata/
+xcuserdata/
+*.moved-aside
+*.pbxuser
+*.mode1v3
+*.mode2v3
+*.perspectivev3
+Package.resolved
+
 # Editor files
 *~
 *.swp

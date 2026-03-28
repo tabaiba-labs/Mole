@@ -157,12 +157,17 @@ discover_project_cache_roots() {
         (project_cache_has_indicators "$dir" 5 && echo "$dir" >> "$_indicator_tmp") &
         _indicator_pids+=($!)
 
-        if [[ ${#_indicator_pids[@]} -ge $_max_jobs ]]; then
+        local _indicator_pid_count=0
+        local _indicator_existing_pid
+        for _indicator_existing_pid in "${_indicator_pids[@]-}"; do
+            [[ -n "$_indicator_existing_pid" ]] && _indicator_pid_count=$((_indicator_pid_count + 1))
+        done
+        if [[ $_indicator_pid_count -ge $_max_jobs ]]; then
             wait "${_indicator_pids[0]}" 2> /dev/null || true
             _indicator_pids=("${_indicator_pids[@]:1}")
         fi
     done
-    for _pid in "${_indicator_pids[@]}"; do
+    for _pid in "${_indicator_pids[@]-}"; do
         wait "$_pid" 2> /dev/null || true
     done
 
