@@ -46,6 +46,17 @@ git merge upstream/main
 - `clean --dry-run --scope user`
 - `clean --scope user`
 
+## CI Policy For This Fork
+
+This fork keeps CI intentionally small.
+
+- `test.yml` is the only workflow expected to run automatically
+- `test.yml` validates the upstream Mole test suite and the JSONL smoke checks
+- `codeql.yml`, `release.yml`, and `update-contributors.yml` are manual-only in this fork
+- `check.yml` is removed in this fork to avoid auto-formatting or bot-driven pushes
+
+The goal is to keep one reliable validation path for safety-critical cleanup changes without carrying unnecessary upstream automation.
+
 ## Integration boundary
 
 Keep GUI-specific behavior limited to the machine contract layer:

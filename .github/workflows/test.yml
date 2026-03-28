@@ -33,6 +33,9 @@ jobs:
           LC_ALL: en_US.UTF-8
         run: ./scripts/test.sh
 
+      - name: Run JSONL smoke checks
+        run: ./scripts/smoke-clean-jsonl.sh
+
   compatibility:
     name: macOS
     strategy:
