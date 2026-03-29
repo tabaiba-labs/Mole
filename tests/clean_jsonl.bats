@@ -114,8 +114,19 @@ PY
 @test "mo clean jsonl system scope can fail fast on missing sudo" {
     local events_file="$HOME/events.jsonl"
     local summary_file="$HOME/summary.json"
+    local mock_bin="$HOME/mock-bin"
+    mkdir -p "$mock_bin"
 
-    run env HOME="$HOME" MOLE_TEST_MODE=1 "$PROJECT_ROOT/mole" clean \
+    cat > "$mock_bin/sudo" <<'EOF'
+#!/bin/bash
+if [[ "$1" == "-n" && "$2" == "true" ]]; then
+    exit 1
+fi
+exit 1
+EOF
+    chmod +x "$mock_bin/sudo"
+
+    run env HOME="$HOME" PATH="$mock_bin:$PATH" MOLE_TEST_MODE=1 "$PROJECT_ROOT/mole" clean \
         --interface jsonl --preflight --scope system --blocking-policy fail \
         --events-file "$events_file" --summary-file "$summary_file"
 
